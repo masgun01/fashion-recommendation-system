@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'fashion-recommendation-secret-key'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'fashion-recommendation-secret-key')
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
@@ -33,6 +33,10 @@ def initialize_recommendation_system():
     global recommendation_system
     try:
         logger.info("🚀 Initializing SHAPE-BASED Recommendation System...")
+        
+        # Add delay untuk memberi waktu sistem startup
+        time.sleep(2)
+        
         recommendation_system = RecommendationSystem()
         success = recommendation_system.initialize_system()
         if success:
@@ -42,11 +46,12 @@ def initialize_recommendation_system():
         return success
     except Exception as e:
         logger.error(f"❌ Initialization error: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 def get_product_image_path(product_id):
     """Get product image path - FIXED VERSION"""
-    image_dirs = ['fashion-dataset/images', 'images']
+    image_dirs = ['fashion-dataset/images', 'images', 'dataset/images']
     product_id_str = str(product_id)
     
     for image_dir in image_dirs:
@@ -102,7 +107,9 @@ def recommend_by_text():
         logger.info(f"🔍 Text query: '{query}'")
         
         if recommendation_system is None:
-            return jsonify({'error': 'System not initialized'}), 500
+            # Try to initialize if not ready
+            if not initialize_recommendation_system():
+                return jsonify({'error': 'System not initialized. Please try again in a moment.'}), 503
         
         recommendations = recommendation_system.hybrid_recommender.recommend_by_text_query(query, None)
         
@@ -123,6 +130,7 @@ def recommend_by_text():
     
     except Exception as e:
         logger.error(f"❌ Text recommendation error: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/recommend/image', methods=['POST'])
@@ -147,7 +155,9 @@ def recommend_by_image():
                 logger.info(f"🔍 Processing image: {filename}")
                 
                 if recommendation_system is None:
-                    return jsonify({'error': 'System not initialized'}), 500
+                    # Try to initialize if not ready
+                    if not initialize_recommendation_system():
+                        return jsonify({'error': 'System not initialized. Please try again in a moment.'}), 503
                 
                 # SHAPE-BASED recommendation
                 recommendations = recommendation_system.hybrid_recommender.recommend_by_image_upload(filepath, None)
@@ -187,19 +197,23 @@ def recommend_by_image():
     
     except Exception as e:
         logger.error(f"❌ Image recommendation error: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/api/statistics', methods=['GET'])
 def get_statistics():
     try:
         if recommendation_system is None:
-            return jsonify({'error': 'System not initialized'}), 500
+            # Try to initialize if not ready
+            if not initialize_recommendation_system():
+                return jsonify({'error': 'System not initialized. Please try again in a moment.'}), 503
             
         stats = recommendation_system.get_dataset_statistics()
         return jsonify(stats)
     
     except Exception as e:
         logger.error(f"❌ Statistics error: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': 'Server error'}), 500
 
 @app.route('/api/products/random', methods=['GET'])
@@ -208,7 +222,9 @@ def get_random_products():
         n = int(request.args.get('n', 8))
         
         if recommendation_system is None:
-            return jsonify({'error': 'System not initialized'}), 500
+            # Try to initialize if not ready
+            if not initialize_recommendation_system():
+                return jsonify({'error': 'System not initialized. Please try again in a moment.'}), 503
         
         if len(recommendation_system.styles_df) > 0:
             sample_df = recommendation_system.styles_df.sample(min(n, len(recommendation_system.styles_df)))
@@ -231,20 +247,55 @@ def get_random_products():
     
     except Exception as e:
         logger.error(f"❌ Random products error: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': 'Server error'}), 500
+
+# Health check endpoint untuk Render
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'healthy',
+        'system_initialized': recommendation_system is not None
+    })
+
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
     print("🚀 Starting SHAPE-BASED Fashion Recommendation System...")
+    
+    # Create necessary directories
+    os.makedirs('static/uploads', exist_ok=True)
+    os.makedirs('dataset/images', exist_ok=True)
+    
+    # Create placeholder image if doesn't exist
+    if not os.path.exists('static/placeholder.jpg'):
+        try:
+            img = Image.new('RGB', (200, 200), color='lightgray')
+            img.save('static/placeholder.jpg')
+            print("✅ Created placeholder image")
+        except Exception as e:
+            print(f"⚠️ Could not create placeholder: {e}")
+    
+    # Initialize system
+    print("🔄 Initializing recommendation system...")
     if initialize_recommendation_system():
         print("✅ System initialized successfully!")
         
-        os.makedirs('static/uploads', exist_ok=True)
+        # Get port from environment variable (Render akan set ini)
+        port = int(os.environ.get('PORT', 5000))
         
-        if not os.path.exists('static/placeholder.jpg'):
-            img = Image.new('RGB', (200, 200), color='lightgray')
-            img.save('static/placeholder.jpg')
+        print(f"🌐 Starting Flask server on port {port}...")
         
-        print("🌐 Starting Flask server...")
-        app.run(debug=True, host='0.0.0.0', port=5000)
+        # Run without debug mode untuk production
+        app.run(host='0.0.0.0', port=port, debug=False)
     else:
-        print("❌ Failed to start server")
+        print("❌ Failed to initialize system - starting server anyway for health checks")
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
