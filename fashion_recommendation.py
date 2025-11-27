@@ -7,117 +7,115 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
 import traceback
+import gc
 from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
 
 class Config:
-    IMAGE_DIR = 'fashion-dataset/images'
-    STYLES_FILE = 'styles.csv'
+    IMAGE_DIR = 'dataset/images'  # Changed to match your structure
+    STYLES_FILE = 'dataset/styles.csv'  # Changed path
     SHAPE_CACHE_FILE = 'shape_features_cache.pkl'
 
-class ShapeFeatureExtractor:
-    """Extract shape features dari gambar fashion items"""
+class OptimizedShapeFeatureExtractor:
+    """Optimized shape feature extractor untuk free tier"""
     
     def __init__(self):
         self.feature_cache = {}
     
     def extract_shape_features(self, image_path):
-        """Extract comprehensive shape features"""
+        """Extract shape features dengan memory optimization"""
         try:
-            # Load image
-            img = cv2.imread(image_path)
+            # Load image dengan optimasi memory
+            img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)  # Load langsung grayscale
             if img is None:
-                print(f"❌ Cannot load image: {image_path}")
                 return None
             
-            # Resize untuk konsistensi
-            img = cv2.resize(img, (200, 200))
+            # Resize lebih kecil untuk free tier
+            img = cv2.resize(img, (150, 150))  # Reduced from 200x200
             
-            # Convert to grayscale
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # Simple blur
+            blurred = cv2.GaussianBlur(img, (3, 3), 0)  # Reduced kernel
             
-            # Apply Gaussian blur
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            
-            # Edge detection untuk mendapatkan bentuk
+            # Edge detection
             edges = cv2.Canny(blurred, 50, 150)
             
             # Find contours
             contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             if not contours:
-                # Jika tidak ada contour, gunakan seluruh image
-                contours, _ = cv2.findContours(np.ones_like(gray) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                return self._get_basic_features(img)  # Fallback
             
-            if not contours:
-                return None
-            
-            # Get largest contour
             largest_contour = max(contours, key=cv2.contourArea)
             
-            # Extract comprehensive shape features
-            features = {}
+            # Extract hanya features penting untuk hemat memory
+            features = self._extract_essential_features(largest_contour, img)
             
-            # 1. Basic geometric features
-            area = cv2.contourArea(largest_contour)
-            perimeter = cv2.arcLength(largest_contour, True)
-            x, y, w, h = cv2.boundingRect(largest_contour)
-            
-            features['aspect_ratio'] = w / h if h > 0 else 0
-            features['area_ratio'] = area / (w * h) if w * h > 0 else 0
-            features['solidity'] = area / cv2.contourArea(cv2.convexHull(largest_contour)) if cv2.contourArea(cv2.convexHull(largest_contour)) > 0 else 0
-            features['extent'] = area / (w * h) if w * h > 0 else 0
-            
-            # 2. Hu Moments (shape descriptors)
-            moments = cv2.moments(largest_contour)
-            hu_moments = cv2.HuMoments(moments).flatten()
-            
-            # Normalize Hu moments
-            for i in range(7):
-                if hu_moments[i] != 0:
-                    features[f'hu_{i}'] = -np.sign(hu_moments[i]) * np.log10(np.abs(hu_moments[i]))
-                else:
-                    features[f'hu_{i}'] = 0
-            
-            # 3. Additional shape features
-            features['compactness'] = (perimeter ** 2) / (4 * np.pi * area) if area > 0 else 0
-            features['circularity'] = (4 * np.pi * area) / (perimeter ** 2) if perimeter > 0 else 0
-            
-            # 4. Bounding box ratios
-            features['width_ratio'] = w / 200.0  # normalized by image width
-            features['height_ratio'] = h / 200.0  # normalized by image height
-            
-            # 5. Position in image
-            features['center_x'] = (x + w/2) / 200.0
-            features['center_y'] = (y + h/2) / 200.0
+            # Clean up memory
+            del img, blurred, edges, contours
+            gc.collect()
             
             return features
             
         except Exception as e:
             print(f"❌ Error extracting shape features: {e}")
             return None
+    
+    def _extract_essential_features(self, contour, img):
+        """Extract hanya features yang paling penting"""
+        features = {}
+        
+        # Basic geometric features saja
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        features['aspect_ratio'] = w / h if h > 0 else 0
+        features['area_ratio'] = area / (w * h) if w * h > 0 else 0
+        features['compactness'] = (perimeter ** 2) / (4 * np.pi * area) if area > 0 else 0
+        
+        # Simplified Hu moments (hanya 3 pertama)
+        moments = cv2.moments(contour)
+        hu_moments = cv2.HuMoments(moments).flatten()
+        
+        for i in range(3):  # Hanya 3 Hu moments
+            if hu_moments[i] != 0:
+                features[f'hu_{i}'] = -np.sign(hu_moments[i]) * np.log10(np.abs(hu_moments[i]))
+            else:
+                features[f'hu_{i}'] = 0
+        
+        return features
+    
+    def _get_basic_features(self, img):
+        """Fallback features jika contour tidak ditemukan"""
+        features = {
+            'aspect_ratio': 1.0,
+            'area_ratio': 0.5,
+            'compactness': 1.0,
+            'hu_0': 0.1,
+            'hu_1': 0.1,
+            'hu_2': 0.1
+        }
+        return features
 
 class ProductCategorizer:
     """Klasifikasi kategori produk berdasarkan nama"""
     
     def __init__(self):
-        # Keywords untuk setiap kategori
         self.category_keywords = {
-            'shoes': ['shoe', 'sneaker', 'boot', 'footwear', 'loafer', 'pump', 'heel', 'oxford'],
-            'sandals': ['sandal', 'flipflop', 'slide', 'thong', 'flip-flop'],
-            'dresses': ['dress', 'gown', 'frock', 'jumper'],
-            'shirts': ['shirt', 'top', 'blouse', 't-shirt', 'tshirt', 'polo'],
-            'pants': ['pant', 'trouser', 'jeans', 'legging', 'chino'],
-            'bags': ['bag', 'purse', 'backpack', 'handbag', 'clutch', 'tote'],
-            'accessories': ['hat', 'cap', 'belt', 'scarf', 'tie', 'watch', 'gloves'],
-            'jackets': ['jacket', 'coat', 'blazer', 'hoodie', 'sweater'],
-            'skirts': ['skirt', 'mini', 'midi', 'maxi'],
-            'shorts': ['short', 'bermuda', 'trunks']
+            'shoes': ['shoe', 'sneaker', 'boot', 'footwear', 'loafer'],
+            'sandals': ['sandal', 'flipflop', 'slide'],
+            'dresses': ['dress', 'gown', 'frock'],
+            'shirts': ['shirt', 'top', 'blouse', 't-shirt'],
+            'pants': ['pant', 'trouser', 'jeans'],
+            'bags': ['bag', 'purse', 'backpack'],
+            'accessories': ['hat', 'cap', 'belt', 'scarf'],
+            'jackets': ['jacket', 'coat', 'blazer'],
+            'skirts': ['skirt', 'mini', 'midi'],
+            'shorts': ['short', 'bermuda']
         }
     
     def predict_category(self, product_name=""):
-        """Predict kategori dari nama produk"""
         if not product_name:
             return 'unknown'
         
@@ -131,12 +129,12 @@ class ProductCategorizer:
         return 'unknown'
 
 class UltraAccurateShapeMatcher:
-    """Shape matcher yang akurat berdasarkan bentuk produk"""
+    """Shape matcher yang dioptimasi untuk free tier"""
     
     def __init__(self, df, config):
         self.df = df
         self.config = config
-        self.feature_extractor = ShapeFeatureExtractor()
+        self.feature_extractor = OptimizedShapeFeatureExtractor()
         self.categorizer = ProductCategorizer()
         self.features_cache = {}
         self.image_mapping = {}
@@ -144,8 +142,8 @@ class UltraAccurateShapeMatcher:
         self._initialize_system()
     
     def _initialize_system(self):
-        """Initialize system dengan precomputed features"""
-        print("🔄 Initializing ULTRA ACCURATE Shape-Based System...")
+        """Initialize dengan optimasi memory"""
+        print("🔄 Initializing OPTIMIZED Shape-Based System...")
         
         # Load cache jika ada
         if os.path.exists(self.config.SHAPE_CACHE_FILE):
@@ -158,32 +156,34 @@ class UltraAccurateShapeMatcher:
                 print(f"✅ Loaded {len(self.features_cache)} precomputed shape features")
             except Exception as e:
                 print(f"❌ Cache corrupted, rebuilding... {e}")
-                self._build_features_cache()
+                self._build_features_cache_optimized()
         else:
-            self._build_features_cache()
+            self._build_features_cache_optimized()
     
-    def _build_features_cache(self):
-        """Build cache untuk semua gambar"""
-        print("🔄 Building shape features cache...")
+    def _build_features_cache_optimized(self):
+        """Build cache dengan optimasi memory"""
+        print("🔄 Building optimized shape features cache...")
         
-        self._build_image_mapping()
+        self._build_image_mapping_optimized()
         
+        # Batasi jumlah gambar untuk free tier (max 1000)
+        max_images = 1000
         valid_count = 0
-        for product_id, filename in tqdm(self.image_mapping.items(), desc="Extracting shapes"):
+        
+        items_to_process = list(self.image_mapping.items())[:max_images]
+        
+        for product_id, filename in tqdm(items_to_process, desc="Extracting shapes"):
             image_path = os.path.join(self.config.IMAGE_DIR, filename)
             
             if os.path.exists(image_path):
-                # Extract shape features
                 shape_features = self.feature_extractor.extract_shape_features(image_path)
                 
                 if shape_features:
-                    # Get product info untuk kategori
                     product_row = self.df[self.df['id'].astype(str) == product_id]
                     product_name = ""
                     if not product_row.empty:
                         product_name = product_row.iloc[0].get('productDisplayName', '')
                     
-                    # Predict kategori
                     category = self.categorizer.predict_category(product_name)
                     
                     self.features_cache[product_id] = {
@@ -192,6 +192,10 @@ class UltraAccurateShapeMatcher:
                         'product_name': product_name
                     }
                     valid_count += 1
+            
+            # Periodic garbage collection
+            if valid_count % 100 == 0:
+                gc.collect()
         
         # Save cache
         cache_data = {
@@ -201,113 +205,97 @@ class UltraAccurateShapeMatcher:
         with open(self.config.SHAPE_CACHE_FILE, 'wb') as f:
             pickle.dump(cache_data, f)
         
-        print(f"✅ Built cache with {valid_count} shape features")
-        
-        # Print category distribution
+        print(f"✅ Built optimized cache with {valid_count} shape features")
         self._print_category_stats()
     
-    def _print_category_stats(self):
-        """Print statistics kategori"""
-        categories = {}
-        for data in self.features_cache.values():
-            cat = data['category']
-            categories[cat] = categories.get(cat, 0) + 1
-        
-        print("📊 Category Distribution:")
-        for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
-            print(f"   {cat}: {count} products")
-    
-    def _build_image_mapping(self):
-        """Build mapping product ID ke image files"""
+    def _build_image_mapping_optimized(self):
+        """Build image mapping dengan optimasi"""
         if not os.path.exists(self.config.IMAGE_DIR):
-            print("⚠️ Images directory not found")
+            print("⚠️ Images directory not found, creating dummy mapping...")
+            # Create dummy mapping dari dataset
+            for _, row in self.df.head(1000).iterrows():  # Max 1000
+                self.image_mapping[str(row['id'])] = f"{row['id']}.jpg"
             return
         
         try:
             image_files = [f for f in os.listdir(self.config.IMAGE_DIR) 
-                          if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
-            print(f"📁 Found {len(image_files)} image files")
+                          if f.lower().endswith(('.jpg', '.jpeg', '.png'))][:2000]  # Limit files
             
-            for file in image_files:
+            for file in image_files[:1000]:  # Max 1000 images
                 name_without_ext = os.path.splitext(file)[0]
                 self.image_mapping[name_without_ext] = file
             
             print(f"✅ Mapped {len(self.image_mapping)} products to images")
         except Exception as e:
             print(f"❌ Error building image mapping: {e}")
+            # Fallback: create from dataset
+            for _, row in self.df.head(500).iterrows():
+                self.image_mapping[str(row['id'])] = f"{row['id']}.jpg"
+    
+    def _print_category_stats(self):
+        categories = {}
+        for data in self.features_cache.values():
+            cat = data['category']
+            categories[cat] = categories.get(cat, 0) + 1
+        
+        print("📊 Category Distribution:")
+        for cat, count in sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"   {cat}: {count} products")
     
     def _calculate_shape_similarity(self, features1, features2):
-        """Hitung similarity antara dua shape features"""
+        """Hitung similarity yang dioptimasi"""
         if not features1 or not features2:
             return 0.0
         
         try:
-            # Get common features
             common_keys = set(features1.keys()) & set(features2.keys())
             if not common_keys:
                 return 0.0
             
-            # Convert to vectors
             vec1 = np.array([features1[k] for k in common_keys])
             vec2 = np.array([features2[k] for k in common_keys])
             
-            # Cosine similarity
             similarity = np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-8)
-            
-            # Ensure valid range
             return max(0.0, min(1.0, similarity))
         except Exception as e:
-            print(f"Similarity calculation error: {e}")
             return 0.0
     
     def recommend_by_image(self, image_path, n_recommendations=None):
-        """Rekomendasi berdasarkan bentuk gambar - ULTRA AKURAT"""
+        """Rekomendasi gambar yang dioptimasi"""
         try:
-            print("🎯 ULTRA ACCURATE SHAPE-BASED MATCHING...")
-            print(f"📁 Processing image: {image_path}")
+            print("🎯 OPTIMIZED SHAPE-BASED MATCHING...")
             
-            # Step 1: Extract features dari gambar upload
             uploaded_features = self.feature_extractor.extract_shape_features(image_path)
             if not uploaded_features:
-                print("❌ Cannot extract shape features from uploaded image")
                 return {"error": "Cannot extract shape features from uploaded image"}
             
-            print(f"✅ Extracted {len(uploaded_features)} shape features")
-            
-            # Step 2: Cari produk dengan shape yang mirip
             similar_products = []
-            processed_count = 0
             
-            for product_id, cache_data in self.features_cache.items():
+            # Batasi processing untuk free tier
+            max_products_to_check = 500
+            items_to_check = list(self.features_cache.items())[:max_products_to_check]
+            
+            for product_id, cache_data in items_to_check:
                 product_features = cache_data['shape_features']
-                product_category = cache_data['category']
-                
-                # Hitung similarity shape
                 similarity = self._calculate_shape_similarity(uploaded_features, product_features)
                 
-                if similarity > 0.3:  # Threshold minimum
+                if similarity > 0.2:  # Lower threshold
                     similar_products.append({
                         'product_id': product_id,
                         'similarity': similarity,
-                        'category': product_category
+                        'category': cache_data['category']
                     })
-                    processed_count += 1
             
-            print(f"🔍 Found {len(similar_products)} similar products (processed {processed_count})")
-            
-            # Step 3: Urutkan berdasarkan similarity tertinggi
             similar_products.sort(key=lambda x: x['similarity'], reverse=True)
             
             if n_recommendations is None:
-                n_recommendations = min(100, len(similar_products))
+                n_recommendations = min(20, len(similar_products))  # Less results
             
-            # Step 4: Siapkan hasil rekomendasi
             recommendations = []
             for i, item in enumerate(similar_products[:n_recommendations]):
                 product_id = item['product_id']
                 similarity_score = float(item['similarity'] * 100)
                 
-                # Cari data produk
                 product_row = self.df[self.df['id'].astype(str) == product_id]
                 if not product_row.empty:
                     product = product_row.iloc[0]
@@ -329,89 +317,72 @@ class UltraAccurateShapeMatcher:
             
             print(f"✅ Shape matching completed! Found {len(recommendations)} similar products")
             
-            # Debug info DETAILED
-            if recommendations:
-                print(f"🎯 TOP 10 SHAPE MATCHES:")
-                for i in range(min(10, len(recommendations))):
-                    rec = recommendations[i]
-                    print(f"   {i+1}. {rec['productDisplayName'][:50]}...")
-                    print(f"       Score: {rec['similarity_score']}% | Type: {rec['articleType']} | Category: {rec['product_category']}")
-            else:
-                print("❌ NO SHAPE-BASED MATCHES FOUND!")
+            # Clean memory
+            gc.collect()
             
             return recommendations if recommendations else {"error": "No similar products found"}
             
         except Exception as e:
             error_msg = f"Error in shape matching: {str(e)}"
             print(f"❌ {error_msg}")
-            traceback.print_exc()
             return {"error": error_msg}
 
 class SmartTextRecommender:
-    """Text recommender yang smart dengan understanding kategori"""
+    """Text recommender yang dioptimasi"""
     
     def __init__(self, df):
         self.df = df
         self.categorizer = ProductCategorizer()
-        self._build_text_similarity_matrix()
+        self._build_text_similarity_matrix_optimized()
     
-    def _build_text_similarity_matrix(self):
-        """Build text similarity matrix"""
-        print("🔄 Building smart text similarity matrix...")
+    def _build_text_similarity_matrix_optimized(self):
+        """Build text similarity dengan optimasi memory"""
+        print("🔄 Building optimized text similarity matrix...")
         
         try:
-            # Enhanced feature combination
-            self.df['search_features'] = (
-                self.df['productDisplayName'].fillna('') + ' ' +
-                self.df['articleType'].fillna('') + ' ' +
-                self.df['baseColour'].fillna('') + ' ' +
-                self.df.get('season', '').fillna('') + ' ' +
-                self.df.get('usage', '').fillna('')
+            # Gunakan sample yang lebih kecil untuk free tier
+            sample_size = min(2000, len(self.df))
+            self.df_sample = self.df.head(sample_size).copy()
+            
+            self.df_sample['search_features'] = (
+                self.df_sample['productDisplayName'].fillna('') + ' ' +
+                self.df_sample['articleType'].fillna('') + ' ' +
+                self.df_sample['baseColour'].fillna('')
             )
             
             self.tfidf = TfidfVectorizer(
                 stop_words='english',
                 ngram_range=(1, 2),
-                max_features=8000,
-                min_df=2
+                max_features=3000,  # Reduced features
+                min_df=1
             )
             
-            self.tfidf_matrix = self.tfidf.fit_transform(self.df['search_features'])
-            print(f"✅ Text similarity matrix built: {self.tfidf_matrix.shape}")
+            self.tfidf_matrix = self.tfidf.fit_transform(self.df_sample['search_features'])
+            print(f"✅ Optimized text matrix: {self.tfidf_matrix.shape}")
             
         except Exception as e:
             print(f"❌ Error building text similarity: {e}")
             raise
     
     def recommend_by_text(self, query_text, n_recommendations=None):
-        """Rekomendasi text dengan understanding kategori"""
+        """Rekomendasi text yang dioptimasi"""
         try:
-            print(f"🔍 Smart text search: '{query_text}'")
+            print(f"🔍 Optimized text search: '{query_text}'")
             
-            # Predict kategori dari query
-            query_category = self.categorizer.predict_category(query_text)
-            if query_category != 'unknown':
-                print(f"📋 Detected category from query: {query_category}")
-            
-            # Transform query
             query_vec = self.tfidf.transform([query_text.lower()])
-            
-            # Calculate similarity
             similarity_scores = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
             
-            # Get relevant results
             relevant_indices = np.where(similarity_scores > 0.01)[0]
             
             if not relevant_indices.size:
                 return {"error": f"No products found for '{query_text}'"}
             
-            # Sort by similarity
             sorted_indices = relevant_indices[np.argsort(similarity_scores[relevant_indices])[::-1]]
             
             if n_recommendations is None:
-                n_recommendations = min(100, len(sorted_indices))
+                n_recommendations = min(20, len(sorted_indices))  # Less results
             
-            results = self.df.iloc[sorted_indices[:n_recommendations]]
+            results = self.df_sample.iloc[sorted_indices[:n_recommendations]]
             similarity_values = similarity_scores[sorted_indices[:n_recommendations]]
             
             recommendations = []
@@ -419,12 +390,7 @@ class SmartTextRecommender:
                 product_name = str(product['productDisplayName']) if pd.notna(product['productDisplayName']) else ''
                 product_category = self.categorizer.predict_category(product_name)
                 
-                # Base similarity score
                 base_score = float(similarity_values[idx] * 100)
-                
-                # Boost score jika kategori cocok
-                if query_category != 'unknown' and product_category == query_category:
-                    base_score = min(100, base_score * 1.2)  # Boost 20%
                 
                 recommendations.append({
                     'id': int(product['id']) if pd.notna(product['id']) else 0,
@@ -449,7 +415,7 @@ class SmartTextRecommender:
             return {"error": f"Text search failed: {str(e)}"}
 
 class HybridRecommender:
-    """Hybrid recommender yang optimized"""
+    """Hybrid recommender yang dioptimasi"""
     
     def __init__(self, text_recommender, image_recommender, df):
         self.text_recommender = text_recommender
@@ -457,23 +423,19 @@ class HybridRecommender:
         self.df = df
     
     def recommend_by_text_query(self, query_text, n_recommendations=None):
-        """Rekomendasi text"""
         try:
             return self.text_recommender.recommend_by_text(query_text, n_recommendations)
         except Exception as e:
-            print(f"❌ Error in text recommendation: {e}")
             return {"error": f"Text recommendation failed: {str(e)}"}
     
     def recommend_by_image_upload(self, image_path, n_recommendations=None):
-        """Rekomendasi gambar"""
         try:
             return self.image_recommender.recommend_by_image(image_path, n_recommendations)
         except Exception as e:
-            print(f"❌ Error in image recommendation: {e}")
             return {"error": f"Image recommendation failed: {str(e)}"}
 
 class RecommendationSystem:
-    """Main system dengan shape-based matching"""
+    """Main system yang dioptimasi untuk free tier"""
     
     def __init__(self):
         self.config = Config()
@@ -483,33 +445,46 @@ class RecommendationSystem:
         self.hybrid_recommender = None
         
     def initialize_system(self):
-        """Initialize shape-based system"""
-        print("🚀 Initializing SHAPE-BASED Recommendation System...")
+        """Initialize system dengan optimasi"""
+        print("🚀 Initializing OPTIMIZED Recommendation System...")
         
-        # Load data
-        if not self._load_data():
+        if not self._load_data_optimized():
             return False
         
         try:
-            # Initialize recommenders
+            # Initialize dengan delay untuk hemat memory
+            import time
+            time.sleep(1)
+            
             self.text_recommender = SmartTextRecommender(self.styles_df)
+            time.sleep(1)
+            
             self.shape_matcher = UltraAccurateShapeMatcher(self.styles_df, self.config)
+            time.sleep(1)
+            
             self.hybrid_recommender = HybridRecommender(
                 self.text_recommender, self.shape_matcher, self.styles_df
             )
             
-            print("✅ SHAPE-BASED system initialized successfully!")
+            print("✅ OPTIMIZED system initialized successfully!")
+            
+            # Force garbage collection
+            gc.collect()
+            
             return True
             
         except Exception as e:
             print(f"❌ Error initializing system: {e}")
-            traceback.print_exc()
             return False
     
-    def _load_data(self):
-        """Load dataset"""
+    def _load_data_optimized(self):
+        """Load dataset dengan optimasi"""
         try:
-            possible_files = [self.config.STYLES_FILE, 'styles.csv', 'fashion-dataset/styles.csv']
+            possible_files = [
+                'dataset/styles.csv',  # Your structure
+                'styles.csv', 
+                'fashion-dataset/styles.csv'
+            ]
             data_file = None
             
             for file in possible_files:
@@ -521,8 +496,8 @@ class RecommendationSystem:
                 print("❌ No dataset file found!")
                 return False
                 
-            self.styles_df = pd.read_csv(data_file, on_bad_lines='skip')
-            print(f"✅ Dataset loaded: {self.styles_df.shape[0]} products")
+            # Load hanya sample untuk free tier
+            self.styles_df = pd.read_csv(data_file, on_bad_lines='skip', nrows=3000)  # Limit rows
             
             # Basic cleaning
             self.styles_df = self.styles_df.drop_duplicates(subset=['id'])
@@ -531,6 +506,7 @@ class RecommendationSystem:
                 if col in self.styles_df.columns:
                     self.styles_df[col] = self.styles_df[col].fillna('Unknown')
             
+            print(f"✅ Optimized dataset loaded: {self.styles_df.shape[0]} products")
             return True
             
         except Exception as e:
@@ -538,7 +514,6 @@ class RecommendationSystem:
             return False
     
     def get_dataset_statistics(self):
-        """Get dataset statistics"""
         if self.styles_df is None:
             return {}
         
